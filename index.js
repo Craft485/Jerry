@@ -1,10 +1,78 @@
 import * as THREE from 'https://cdn.skypack.dev/three@0.136'
 import {OrbitControls} from 'https://cdn.skypack.dev/three@0.136/examples/jsm/controls/OrbitControls.js'
 
+const DEFAULTMASS = 10
+
+class RigidBody {
+    constructor() {}
+
+    setRestitution(val) {
+        this.body.setRestitution(val)
+    }
+
+    setFriction(val) {
+        this.body.setFriction(val)
+    }
+    
+    setRollingFriction(val) {
+        this.body.setRollingFriction(val)
+    }
+
+    createBox(mass, pos, quat, size) {
+        this.transform = new Ammo.btTransform()
+        this.transform.setIdentity()
+        this.transform.setOrigin(new Ammo.btVector3(pos.x, pos.y, pos.z))
+        this.transform.setRotation(new Ammo.btQuaternion(quat.x, quat.y, quat.z, quat.w))
+        this.motionState = new Ammo.btDefaultMotionState(this.transform)
+
+        const btSize = new Ammo.btVector3(size.x * 0.5, size.y * 0.5, size.z * 0.5)
+        this.shape = new Ammo.btBoxShape(btSize)
+        this.shape.setMargin(0.05)
+
+        this.inertia = new Ammo.btVector3(0, 0, 0)
+        if (mass > 0) {
+          this.shape.calculateLocalInertia(mass, this.inertia)
+        }
+    
+        this.info = new Ammo.btRigidBodyConstructionInfo(
+            mass, this.motionState, this.shape, this.inertia)
+        this.body = new Ammo.btRigidBody(this.info)
+    
+        Ammo.destroy(btSize)
+    }
+
+    createSphere(mass, pos, size) {
+        this.transform = new Ammo.btTransform()
+        this.transform.setIdentity()
+        this.transform.setOrigin(new Ammo.btVector3(pos.x, pos.y, pos.z))
+        this.transform.setRotation(new Ammo.btQuaternion(0, 0, 0, 1))
+        this.motionState = new Ammo.btDefaultMotionState(this.transform)
+    
+        this.shape = new Ammo.btSphereShape(size)
+        this.shape.setMargin(0.05)
+    
+        this.inertia = new Ammo.btVector3(0, 0, 0)
+        if(mass > 0) {
+          this.shape.calculateLocalInertia(mass, this.inertia)
+        }
+    
+        this.info = new Ammo.btRigidBodyConstructionInfo(mass, this.motionState, this.shape, this.inertia)
+        this.body = new Ammo.btRigidBody(this.info)
+    }
+}
+
 class World {
     constructor() {}
 
     init() {
+        // Setup Ammo physics
+        this.collisionConfiguration = new Ammo.btDefaultCollisionConfiguration()
+        this.dispatcher = new Ammo.btCollisionDispatcher(this.collisionConfiguration)
+        this.broadphase = new Ammo.btDbvtBroadphase()
+        this.solver = new Ammo.btSequentialImpulseConstraintSolver()
+        this.physicsWorld = new Ammo.btDiscreteDynamicsWorld(this.dispatcher, this.broadphase, this.solver, this.collisionConfiguration)
+        this.physicsWorld.setGravity(new Ammo.btVector3(0, -100, 0))
+
         this.renderer = new THREE.WebGLRenderer({ antialias: true })
         this.renderer.shadowMap.enabled = true
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
@@ -47,10 +115,38 @@ class World {
 
         this.scene.background = new THREE.Color('skyblue')
 
+        // Threejs render of ground
         const ground = new THREE.Mesh(new THREE.BoxGeometry(100, 1, 100), new THREE.MeshStandardMaterial({ color: 0x404040 }))
         ground.castShadow = false
         ground.receiveShadow = true
         this.scene.add(ground)
+
+        // Add ground representation into Ammo
+        const rbGround = new RigidBody()
+        rbGround.createBox(0, ground.position, ground.quaternion, new THREE.Vector3(100, 1, 100))
+        rbGround.setRestitution(0.99)
+        this.physicsWorld.addRigidBody(rbGround.body)
+
+        this.rigidBodies = []
+
+        const box = new THREE.Mesh(
+          new THREE.BoxGeometry(4, 4, 4),
+          new THREE.MeshStandardMaterial({color: 0x808080}))
+        box.position.set(0, 40, 0)
+        box.castShadow = true
+        box.receiveShadow = true
+        this.scene.add(box)
+
+        const rbBox = new RigidBody()
+        rbBox.createBox(1, box.position, box.quaternion, new THREE.Vector3(4, 4, 4))
+        rbBox.setRestitution(0.25)
+        rbBox.setFriction(1)
+        rbBox.setRollingFriction(5)
+        this.physicsWorld.addRigidBody(rbBox.body)
+        
+        this.rigidBodies.push({mesh: box, rigidBody: rbBox})
+
+        this.tmpTransform = new Ammo.btTransform()
 
         this.countdown = 1
         this.count = 0
@@ -82,16 +178,32 @@ class World {
         if (this.countdown < 0 && this.count < 10) {
             this.countdown = 0.25
             this.count += 1
-            // this.spawn()
         }
 
         // Update rb
+        this.physicsWorld.stepSimulation(timeElapsedS, 10)
+
+        for (let i = 0; i < this.rigidBodies.length; i++) {
+            this.rigidBodies[i].rigidBody.motionState.getWorldTransform(this.tmpTransform)
+            const pos = this.tmpTransform.getOrigin()
+            const quat = this.tmpTransform.getRotation()
+            const pos3 = new THREE.Vector3(pos.x(), pos.y(), pos.z())
+            const quat3 = new THREE.Quaternion(quat.x(), quat.y(), quat.z(), quat.w())
+
+            this.rigidBodies[i].mesh.position.copy(pos3)
+            this.rigidBodies[i].mesh.quaternion.copy(quat3)
+        }
     }
 }
 
 let APP = null
 
 window.addEventListener('DOMContentLoaded', async () => {
-    APP = new World()
-    APP.init()
+    Ammo().then(lib => {
+        Ammo = lib
+        APP = new World()
+        APP.init()
+        // Expose app to dev tools
+        window.APP = APP
+    })
 })
